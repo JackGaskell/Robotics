@@ -1,0 +1,137 @@
+#include <Wire.h>
+#include <Zumo32U4.h>
+
+#define QTR_THRESHOLD             600  //Microseconds
+#define REVERSE_SPEED             80   //Speed for reversing
+#define TURN_SPEED                150   //Speed for turning
+#define FORWARD_SPEED             80   //Speed for forward 
+#define REVERSE_DURATION          250   //Duration for reversing 
+#define TURN_DURATION             300   //Duration for turning 
+#define MAX_CONSECUTIVE_TURNS     3     //Maximum consecutive turns before a 90-degree turn
+#define TURN_TIMEOUT              3000  //Timeout for detecting quick alternating turns 
+#define CORNER_CHECK_INTERVAL     500   //Interval for checking if stuck in a corner 
+#define CORNER_TURN_DURATION      600   //Duration for a corner turn
+#define SENSOR_THRESHOLD          6     //Threshold for object detection
+#define RANDOM_TURN_INTERVAL      15000 //Interval for random turn 
+
+Zumo32U4OLED display;
+Zumo32U4ButtonA buttonA;
+Zumo32U4Buzzer buzzer;
+Zumo32U4Motors motors;
+Zumo32U4LineSensors lineSensors;
+Zumo32U4ProximitySensors proxSensors;
+
+#define NUM_SENSORS 3
+unsigned int lineSensorValues[NUM_SENSORS];
+int consecutiveTurns = 0; //counter for consecutive turns in the same direction
+bool lastTurnLeft = false; //track the direction of the last turn
+unsigned long lastTurnTime = 0; //time of the last turn
+unsigned long lastCornerCheckTime = 0; //time of the last corner check
+unsigned long lastRandomTurnTime = 0; //time of the last random turn
+
+void waitForButtonAndCountDown() {
+  ledYellow(1);
+  display.clear();
+  display.print(F("Press A"));
+  buttonA.waitForButton();
+  ledYellow(0);
+  display.clear();
+  for (int i = 3; i > 0; i--) {
+    display.print(i);
+    delay(1000);
+    buzzer.playNote(NOTE_G(3), 200, 15);
+    display.clear();
+  }
+  buzzer.playNote(NOTE_G(4), 500, 15);
+  delay(1000);
+}
+
+void setup() {
+  lineSensors.initThreeSensors();
+  proxSensors.initThreeSensors();
+  waitForButtonAndCountDown();
+}
+
+//Random turn logic
+
+void performRandomTurn() {
+  //Randomly choose to turn left or right
+  bool turnLeft = random(2);
+  int turnSpeed = turnLeft ? TURN_SPEED : -TURN_SPEED;
+  motors.setSpeeds(turnSpeed, -turnSpeed);
+  delay(TURN_DURATION); 
+  lastRandomTurnTime = millis(); //Update the time of the last one
+}
+
+//Main loop for robot movements/behaviour
+
+void loop() {
+  //Check for objects, if detected the robot will stop beep, make a left turn and activate the yellow LED.
+  proxSensors.read();
+  if (proxSensors.countsFrontWithLeftLeds() >= SENSOR_THRESHOLD || proxSensors.countsFrontWithRightLeds() >= SENSOR_THRESHOLD) {
+    motors.setSpeeds(0, 0); //stop 
+    buzzer.play("L16 cdegreg4"); //beep
+    motors.setSpeeds(-TURN_SPEED, TURN_SPEED); //turn to left
+    delay(1000); //Wait a bit
+    ledYellow(1);
+  }
+
+  lineSensors.read(lineSensorValues);
+//Navigation logic, if the robot detects no line it moves forward, if a line is detected, it does a corrective movement based on which sensor detected the line.
+  bool allWhite = true;
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    if (lineSensorValues[i] > QTR_THRESHOLD) {
+      allWhite = false;
+      break;
+    }
+  }
+
+  if (allWhite) {
+    motors.setSpeeds(FORWARD_SPEED, FORWARD_SPEED);
+    consecutiveTurns = 0;
+  } else {
+    unsigned long currentTime = millis();
+    unsigned long timeSinceLastTurn = currentTime - lastTurnTime;
+
+    motors.setSpeeds(-REVERSE_SPEED, -REVERSE_SPEED); //Reverse
+    delay(REVERSE_DURATION);
+
+    //Turn based on which sensor detercted the line
+    if (lineSensorValues[0] > QTR_THRESHOLD) {
+      motors.setSpeeds(TURN_SPEED, -TURN_SPEED); //turn to right
+      lastTurnLeft = false;
+    } else if (lineSensorValues[2] > QTR_THRESHOLD) {
+      motors.setSpeeds(-TURN_SPEED, TURN_SPEED); //turn to left
+      lastTurnLeft = true;
+    }
+
+    delay(TURN_DURATION);
+    motors.setSpeeds(FORWARD_SPEED, FORWARD_SPEED); //Resume
+    consecutiveTurns++;
+
+    //Corner Escape Logic, if the robot has reached the max consectutive turns or a timeout has been reached, it performs a turn to escape corners.
+    if (consecutiveTurns >= MAX_CONSECUTIVE_TURNS || timeSinceLastTurn >= TURN_TIMEOUT) {
+      unsigned long currentMillis = millis();
+      if (currentMillis - lastCornerCheckTime >= CORNER_CHECK_INTERVAL) {
+        lastCornerCheckTime = currentMillis;
+        motors.setSpeeds(-TURN_SPEED, TURN_SPEED); //Turn out of corner
+        delay(CORNER_TURN_DURATION);
+        consecutiveTurns = 0;
+      }
+    }
+
+    lastTurnTime = millis();
+  }
+
+  //Random Turn logic, peforms random turn to help navigate maze and avoid getting stuck.
+  if (millis() - lastRandomTurnTime >= RANDOM_TURN_INTERVAL) {
+    performRandomTurn();
+  }
+
+  //Button A to stop and recalibrate or restart
+  if (buttonA.isPressed()) {
+    motors.setSpeeds(0, 0); //Stop the motors
+    buttonA.waitForRelease(); //Wait for button release
+    waitForButtonAndCountDown(); //Countdown and potentially recalibrate
+  }
+}
